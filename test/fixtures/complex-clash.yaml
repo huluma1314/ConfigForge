@@ -1,0 +1,46 @@
+mixed-port: 7890
+allow-lan: true
+proxy-providers:
+  air:
+    type: http
+    url: https://example.com/providers/air.yaml
+    interval: 3600
+    path: ./providers/air.yaml
+proxies:
+  - name: WS-VMess
+    type: vmess
+    server: vmess.example.com
+    port: 443
+    uuid: 123e4567-e89b-12d3-a456-426614174000
+    network: ws
+    tls: true
+    servername: cdn.example.com
+    host: cdn.example.com
+    path: /socket
+    udp: true
+    skip-cert-verify: true
+  - name: VLESS-GRPC
+    type: vless
+    server: vless.example.com
+    port: 443
+    uuid: 223e4567-e89b-12d3-a456-426614174000
+    network: grpc
+    tls: true
+    flow: xtls-rprx-vision
+    servername: grpc.example.com
+proxy-groups:
+  - name: Auto
+    type: url-test
+    use:
+      - air
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+  - name: Manual
+    type: select
+    proxies:
+      - WS-VMess
+      - VLESS-GRPC
+rules:
+  - PROCESS-NAME,Telegram,Manual
+  - GEOIP,CN,DIRECT
+  - MATCH,Auto

@@ -1,0 +1,32 @@
+port: 7890
+allow-lan: false
+proxies:
+  - name: HK-SS
+    type: ss
+    server: hk.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: pass123
+  - name: US-Trojan
+    type: trojan
+    server: us.example.com
+    port: 443
+    password: secret
+    sni: cdn.example.com
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - HK-SS
+      - US-Trojan
+  - name: Auto
+    type: url-test
+    url: http://www.gstatic.com/generate_204
+    interval: 600
+    proxies:
+      - HK-SS
+      - US-Trojan
+rules:
+  - DOMAIN-SUFFIX,apple.com,Proxy
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy

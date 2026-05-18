@@ -1,0 +1,3 @@
+payload:
+  - DOMAIN-SUFFIX,github.com,Proxy
+  - MATCH,DIRECT
