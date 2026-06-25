@@ -634,6 +634,30 @@ function runTokenCommand(args) {
   });
 }
 
+function parseWranglerJson(stdout) {
+  // wrangler 输出可能混了 ANSI 警告/banner 和 "Success!" 后缀，提取首尾大括号或方括号之间的 JSON
+  const cleaned = String(stdout || '').replace(ANSI_PATTERN, '');
+  const objStart = cleaned.indexOf('{');
+  const arrStart = cleaned.indexOf('[');
+  let start = -1;
+  let endChar = '';
+  if (objStart === -1 && arrStart === -1) {
+    throw new Error('wrangler returned no JSON');
+  }
+  if (objStart === -1 || (arrStart !== -1 && arrStart < objStart)) {
+    start = arrStart;
+    endChar = ']';
+  } else {
+    start = objStart;
+    endChar = '}';
+  }
+  const end = cleaned.lastIndexOf(endChar);
+  if (end <= start) {
+    throw new Error('wrangler JSON malformed');
+  }
+  return JSON.parse(cleaned.slice(start, end + 1));
+}
+
 function runWranglerJson(args) {
   return new Promise((resolve, reject) => {
     const child = spawn('wrangler', buildWranglerArgs(args), {
@@ -904,11 +928,12 @@ async function listUsers() {
       return listUsersFromRecords(records.filter(Boolean));
     } catch (error) {
       console.warn('[WARN] CF API failed, falling back to wrangler:', error.message);
+      console.warn('[WARN] Stack:', error.stack);
     }
   }
 
   // 回退到 wrangler
-  const listed = JSON.parse(await runWranglerJson(['kv', 'key', 'list', '--binding', 'SUB_TOKENS', '--remote']));
+  const listed = parseWranglerJson(await runWranglerJson(['kv', 'key', 'list', '--binding', 'SUB_TOKENS', '--remote']));
   const tokenItems = listed.filter((item) => item?.name?.startsWith(TOKEN_PREFIX));
 
   if (tokenItems.length === 0) {
@@ -947,11 +972,17 @@ async function listUsers() {
     }
 
     // 解析 bulk get 输出
-    const bulkResult = JSON.parse(result.stdout);
-    const records = bulkResult.map(item => ({
-      name: item.key,
-      value: JSON.parse(item.value || '{}'),
-    }));
+    // wrangler 返回的是 {key: stringifiedJsonValue} 对象，不是数组
+    const bulkObject = parseWranglerJson(result.stdout);
+    const records = Object.entries(bulkObject).map(([key, value]) => {
+      let parsed = {};
+      try {
+        parsed = typeof value === 'string' ? JSON.parse(value || '{}') : (value || {});
+      } catch (err) {
+        console.warn(`[WARN] Failed to parse value for ${key}:`, err.message);
+      }
+      return { name: key, value: parsed };
+    });
 
     return listUsersFromRecords(records);
   } finally {
@@ -1118,6 +1149,8 @@ async function handleRequest(request, env = process.env) {
       },
     });
   } catch (error) {
+    console.error('[ERROR] handleRequest failed for', url.pathname, ':', error.message);
+    console.error('[ERROR] Stack:', error.stack);
     return jsonResponse({ error: error.message }, 400);
   }
 }

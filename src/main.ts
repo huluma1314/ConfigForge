@@ -8,6 +8,7 @@ import {
   type SubscriptionOutputMode,
   type SubscriptionTargetFormat
 } from "./subscription";
+import { initSourceWorkbench, renderSourceWorkbenchMarkup } from "./source-workbench";
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -19,8 +20,12 @@ function getDownloadName(format: ConfigFormat): string {
       return "configforge-output-qx.conf";
     case "surge":
       return "configforge-output-surge.conf";
+    case "surfboard":
+      return "configforge-output-surfboard.conf";
     case "clash":
       return "configforge-output-clash.yaml";
+    case "sing-box":
+      return "configforge-output-singbox.json";
   }
 }
 
@@ -32,11 +37,26 @@ function getSubscriptionOutputModeLabel(mode: string): string {
   return mode === "link" ? "转换链接" : "文件内容";
 }
 
+function getSubscriptionPipelineLabel(pipeline: string): string {
+  switch (pipeline) {
+    case "backend-link":
+      return "后端转换链接";
+    case "full-config":
+      return "完整配置转换";
+    case "node-subscription":
+      return "节点订阅转换";
+    default:
+      return pipeline;
+  }
+}
+
 function renderSubscriptionTargetOptions(): string {
   return [
     { value: "qx", label: "Quantumult X" },
     { value: "surge", label: "Surge" },
+    { value: "surfboard", label: "Surfboard" },
     { value: "clash", label: "Clash" },
+    { value: "sing-box", label: "sing-box" },
     { value: "uri-list", label: "URI 列表" },
     { value: "base64-uri", label: "Base64 URI" }
   ]
@@ -140,19 +160,41 @@ if (!app) {
 
 app.innerHTML = `
   <div class="app-shell">
-    <header class="topbar">
+    <aside class="app-sidebar">
       <div class="brand">
         <span class="brand-mark">${ICON_BOLT}</span>
         <span class="brand-text">
           <span class="brand-name">ConfigForge</span>
-          <span class="brand-tag">QX · Surge · Clash 全量互转 · 纯前端离线</span>
+          <span class="brand-tag">配置转换工具台</span>
         </span>
       </div>
-      <nav class="mode-tabs" aria-label="转换模式">
-        <button id="config-tab" class="mode-tab active" type="button">完整配置</button>
-        <button id="subscription-tab" class="mode-tab" type="button">订阅链接</button>
+      <nav class="side-nav" aria-label="转换模式">
+        <button id="config-tab" class="nav-item active" type="button">
+          <span class="nav-icon">↔</span>
+          <span>快速转换</span>
+        </button>
+        <button id="source-tab" class="nav-item" type="button">
+          <span class="nav-icon">▦</span>
+          <span>来源库</span>
+        </button>
+        <button id="subscription-tab" class="nav-item" type="button">
+          <span class="nav-icon">⛓</span>
+          <span>订阅转换</span>
+        </button>
+        <a class="nav-item" href="/sub-store/admin.html#users">
+          <span class="nav-icon">U</span>
+          <span>用户管理</span>
+        </a>
+        <a class="nav-item" href="/sub-store/admin.html#sources">
+          <span class="nav-icon">S</span>
+          <span>订阅源管理</span>
+        </a>
       </nav>
-      <div class="topbar-right">
+      <div class="sidebar-card">
+        <strong>本地优先</strong>
+        <span>完整配置转换在浏览器内完成；远程订阅转换只在你选择后端时使用。</span>
+      </div>
+      <div class="sidebar-footer">
         <div class="format-pills">
           <span class="pill pill-qx">QX</span>
           <span class="pill pill-surge">Surge</span>
@@ -163,45 +205,50 @@ app.innerHTML = `
           <span class="icon-moon">${ICON_MOON}</span>
         </button>
       </div>
-    </header>
+    </aside>
+
+    <div class="app-main">
 
     <main id="config-workbench" class="workbench active">
-      <section class="workspace-hero">
-        <div class="workspace-copy">
-          <p class="workspace-kicker">完整配置转换</p>
-          <h1 class="workspace-title">更紧凑、更专业的代理配置工作台</h1>
-          <p class="workspace-description">保持纯前端离线体验，先统一解析，再导出目标格式，适合快速校验、转换与整理结果。</p>
+      <section class="page-heading compact-heading">
+        <div>
+          <p class="workspace-kicker">快速转换</p>
+          <h1 class="workspace-title">完整配置转换</h1>
+          <p class="workspace-description">粘贴或导入配置，选择目标格式后直接转换。</p>
         </div>
-        <div class="workspace-stats" aria-label="ConfigForge 能力概览">
-          <article class="workspace-stat">
-            <span>支持格式</span>
-            <strong>QX / Surge / Clash</strong>
-          </article>
-          <article class="workspace-stat">
-            <span>工作方式</span>
-            <strong>本地离线 · 浏览器内完成</strong>
-          </article>
-          <article class="workspace-stat">
-            <span>适用场景</span>
-            <strong>导入、比对、导出、快速验收</strong>
-          </article>
+        <div class="status-strip" aria-label="转换能力">
+          <span class="status-chip success">本地运行</span>
+          <span class="status-chip">自动识别</span>
+          <span class="status-chip warning">远程规则可选</span>
         </div>
       </section>
-      <section class="toolbar">
+      <section class="toolbar component-toolbar">
+        <div class="field component-mode-field">
+          <span class="field-label">工作流</span>
+          <span class="segmented-control" aria-label="当前工作流">
+            <span class="active">配置</span>
+            <span>订阅</span>
+            <span>来源</span>
+          </span>
+        </div>
         <label class="field">
           <span class="field-label">源格式</span>
           <select id="source-format">
             <option value="">自动检测</option>
             <option value="qx">Quantumult X</option>
             <option value="surge">Surge</option>
+            <option value="surfboard">Surfboard</option>
             <option value="clash">Clash</option>
+            <option value="sing-box">sing-box</option>
           </select>
         </label>
         <label class="field">
           <span class="field-label">目标格式</span>
           <select id="target-format">
             <option value="clash">Clash</option>
+            <option value="sing-box">sing-box</option>
             <option value="surge">Surge</option>
+            <option value="surfboard">Surfboard</option>
             <option value="qx">Quantumult X</option>
           </select>
         </label>
@@ -217,12 +264,9 @@ app.innerHTML = `
           </span>
           <input type="checkbox" id="expand-remote-rules" />
         </label>
-        <button id="transform-button" class="primary-btn" type="button">
-          <span>开始转换</span>${ICON_ARROW}
-        </button>
       </section>
 
-      <section class="editors">
+      <section class="editors quick-convert-editors">
         <article class="editor">
           <header class="editor-head">
             <div class="editor-title">
@@ -237,6 +281,11 @@ app.innerHTML = `
           </header>
           <textarea id="input-text" placeholder="粘贴 Quantumult X / Surge / Clash 配置内容..." spellcheck="false"></textarea>
         </article>
+        <div class="convert-action">
+          <button id="transform-button" class="primary-btn" type="button">
+            <span>开始转换</span>${ICON_ARROW}
+          </button>
+        </div>
         <article class="editor">
           <header class="editor-head">
             <div class="editor-title">
@@ -286,31 +335,45 @@ app.innerHTML = `
           </div>
         </div>
       </section>
+      <details class="worker-settings">
+        <summary>订阅发布设置</summary>
+        <div class="worker-settings-body">
+          <label class="field">
+            <span class="field-label">Worker URL</span>
+            <input type="url" id="worker-url" placeholder="https://configforge-sub.xxx.workers.dev" />
+          </label>
+          <label class="field">
+            <span class="field-label">Token</span>
+            <input type="text" id="worker-token" placeholder="部署时生成的 AUTH_TOKEN" />
+          </label>
+          <button id="publish-button" class="ghost-btn" type="button">${ICON_ARROW}<span>发布订阅</span></button>
+          <p class="hint" style="margin:0;font-size:0.75rem;opacity:0.7">首次部署运行 <code>bash worker/deploy.sh</code>，之后在这里上传即可</p>
+        </div>
+      </details>
     </main>
 
     <main id="subscription-workbench" class="workbench">
-      <section class="workspace-hero">
-        <div class="workspace-copy">
+      <section class="page-heading compact-heading">
+        <div>
           <p class="workspace-kicker">订阅链接转换</p>
-          <h1 class="workspace-title">把订阅处理成更好管理的交付结果</h1>
-          <p class="workspace-description">支持链接与内容两种输入方式，可输出配置文件、URI 列表或后端转换链接。</p>
+          <h1 class="workspace-title">订阅转换</h1>
+          <p class="workspace-description">输入订阅链接或内容，输出文件内容、URI 列表或后端转换链接。</p>
         </div>
-        <div class="workspace-stats" aria-label="订阅转换能力概览">
-          <article class="workspace-stat">
-            <span>输入来源</span>
-            <strong>订阅链接 / 原始内容</strong>
-          </article>
-          <article class="workspace-stat">
-            <span>输出方式</span>
-            <strong>本地内容 / 转换链接</strong>
-          </article>
-          <article class="workspace-stat">
-            <span>目标交付</span>
-            <strong>配置文件 / URI / Base64 URI</strong>
-          </article>
+        <div class="status-strip" aria-label="订阅转换能力">
+          <span class="status-chip">链接 / 内容</span>
+          <span class="status-chip success">文件 / 链接</span>
+          <span class="status-chip">多目标格式</span>
         </div>
       </section>
-      <section class="toolbar">
+      <section class="toolbar component-toolbar">
+        <div class="field component-mode-field">
+          <span class="field-label">交付方式</span>
+          <span class="segmented-control" aria-label="订阅交付方式">
+            <span class="active">内容</span>
+            <span>链接</span>
+            <span>URI</span>
+          </span>
+        </div>
         <label class="field">
           <span class="field-label">输入方式</span>
           <select id="subscription-input-mode">
@@ -408,6 +471,11 @@ app.innerHTML = `
         </div>
       </section>
     </main>
+
+    <main id="source-workbench" class="workbench">
+      ${renderSourceWorkbenchMarkup()}
+    </main>
+    </div>
   </div>
 `;
 
@@ -417,8 +485,10 @@ const themeToggleEl = document.getElementById("theme-toggle") as HTMLButtonEleme
 
 const configTabEl = document.getElementById("config-tab") as HTMLButtonElement;
 const subscriptionTabEl = document.getElementById("subscription-tab") as HTMLButtonElement;
+const sourceTabEl = document.getElementById("source-tab") as HTMLButtonElement;
 const configWorkbenchEl = document.getElementById("config-workbench") as HTMLElement;
 const subscriptionWorkbenchEl = document.getElementById("subscription-workbench") as HTMLElement;
+const sourceWorkbenchEl = document.getElementById("source-workbench") as HTMLElement;
 
 const sourceFormatEl = document.getElementById("source-format") as HTMLSelectElement;
 const targetFormatEl = document.getElementById("target-format") as HTMLSelectElement;
@@ -432,6 +502,9 @@ const logBoxEl = document.getElementById("log-box") as HTMLDivElement;
 const notesBoxEl = document.getElementById("notes-box") as HTMLDivElement;
 const copyButtonEl = document.getElementById("copy-button") as HTMLButtonElement;
 const downloadButtonEl = document.getElementById("download-button") as HTMLButtonElement;
+const publishButtonEl = document.getElementById("publish-button") as HTMLButtonElement;
+const workerUrlEl = document.getElementById("worker-url") as HTMLInputElement;
+const workerTokenEl = document.getElementById("worker-token") as HTMLInputElement;
 
 const subscriptionInputModeEl = document.getElementById("subscription-input-mode") as HTMLSelectElement;
 const subscriptionTargetFormatEl = document.getElementById("subscription-target-format") as HTMLSelectElement;
@@ -485,19 +558,18 @@ themeToggleEl.addEventListener("click", () => {
 });
 
 /* ─── Mode Tabs ─── */
-configTabEl.addEventListener("click", () => {
-  configTabEl.classList.add("active");
-  subscriptionTabEl.classList.remove("active");
-  configWorkbenchEl.classList.add("active");
-  subscriptionWorkbenchEl.classList.remove("active");
-});
+function activateWorkbench(mode: "config" | "subscription" | "source") {
+  configTabEl.classList.toggle("active", mode === "config");
+  subscriptionTabEl.classList.toggle("active", mode === "subscription");
+  sourceTabEl.classList.toggle("active", mode === "source");
+  configWorkbenchEl.classList.toggle("active", mode === "config");
+  subscriptionWorkbenchEl.classList.toggle("active", mode === "subscription");
+  sourceWorkbenchEl.classList.toggle("active", mode === "source");
+}
 
-subscriptionTabEl.addEventListener("click", () => {
-  subscriptionTabEl.classList.add("active");
-  configTabEl.classList.remove("active");
-  subscriptionWorkbenchEl.classList.add("active");
-  configWorkbenchEl.classList.remove("active");
-});
+configTabEl.addEventListener("click", () => activateWorkbench("config"));
+subscriptionTabEl.addEventListener("click", () => activateWorkbench("subscription"));
+sourceTabEl.addEventListener("click", () => activateWorkbench("source"));
 
 /* ─── Drawer Tabs & Collapse ─── */
 document.querySelectorAll<HTMLElement>(".drawer-tabs").forEach((tabs) => {
@@ -626,6 +698,106 @@ downloadButtonEl.addEventListener("click", () => {
   focusDrawerPane(configWorkbenchEl, "status");
 });
 
+/* ─── Publish to Worker ─── */
+const WORKER_URL_KEY = "configforge-worker-url";
+const WORKER_TOKEN_KEY = "configforge-worker-token";
+
+try {
+  workerUrlEl.value = localStorage.getItem(WORKER_URL_KEY) ?? "";
+  workerTokenEl.value = localStorage.getItem(WORKER_TOKEN_KEY) ?? "";
+} catch {}
+
+publishButtonEl.addEventListener("click", async () => {
+  const input = inputTextEl.value.trim();
+  if (!input) {
+    statusBoxEl.innerHTML = `<p class="error">请先输入配置内容。</p>`;
+    focusDrawerPane(configWorkbenchEl, "status");
+    return;
+  }
+
+  const workerUrl = workerUrlEl.value.trim().replace(/\/+$/, "");
+  const workerToken = workerTokenEl.value.trim();
+  if (!workerUrl) {
+    statusBoxEl.innerHTML = `<p class="error">请先在「订阅发布设置」中填写 Worker URL。</p>`;
+    focusDrawerPane(configWorkbenchEl, "status");
+    return;
+  }
+
+  try {
+    localStorage.setItem(WORKER_URL_KEY, workerUrl);
+    localStorage.setItem(WORKER_TOKEN_KEY, workerToken);
+  } catch {}
+
+  publishButtonEl.disabled = true;
+  const targets: ConfigFormat[] = ["sing-box", "clash", "surge", "surfboard", "qx"];
+  const formats: Record<string, string> = {};
+  const failures: string[] = [];
+
+  try {
+    const sourceFormat = (sourceFormatEl.value || undefined) as ConfigFormat | undefined;
+
+    for (const target of targets) {
+      statusBoxEl.innerHTML = `<p>正在生成 ${escapeHtml(target)} 格式...</p>`;
+      focusDrawerPane(configWorkbenchEl, "status");
+      const result = await transformConfig(input, {
+        sourceFormat,
+        targetFormat: target,
+        expandRemoteRules: expandRemoteEl.checked,
+        expandRemoteProxies: false
+      });
+      if (result.output?.content) {
+        formats[target] = result.output.content;
+      } else {
+        failures.push(`${target}: ${result.parseValidation.errors.map((e) => e.message).join("；") || "生成失败"}`);
+      }
+    }
+
+    if (Object.keys(formats).length === 0) {
+      statusBoxEl.innerHTML = `<p class="error">所有格式生成失败：${escapeHtml(failures.join(" | "))}</p>`;
+      focusDrawerPane(configWorkbenchEl, "status");
+      return;
+    }
+
+    statusBoxEl.innerHTML = `<p>正在上传 ${Object.keys(formats).length} 种格式到 Worker...</p>`;
+    focusDrawerPane(configWorkbenchEl, "status");
+
+    const resp = await fetch(`${workerUrl}/api/upload`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(workerToken ? { Authorization: `Bearer ${workerToken}` } : {})
+      },
+      body: JSON.stringify({ formats })
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      statusBoxEl.innerHTML = `<p class="error">上传失败: ${escapeHtml(data.error ?? resp.statusText)}</p>`;
+      focusDrawerPane(configWorkbenchEl, "status");
+      return;
+    }
+
+    const subUrl = workerToken ? `${workerUrl}/sub?token=${workerToken}` : `${workerUrl}/sub`;
+    const failureNote = failures.length > 0
+      ? `<p class="hint" style="color:var(--warn);font-size:0.75rem;margin-top:0.5rem">部分格式跳过：${escapeHtml(failures.join(" | "))}</p>`
+      : "";
+    statusBoxEl.innerHTML = `
+      <p class="success-copy">配置已发布（${Object.keys(formats).length} 种格式）！订阅链接（自动识别客户端）:</p>
+      <p><code style="word-break:break-all;user-select:all">${escapeHtml(subUrl)}</code></p>
+      <p class="hint" style="font-size:0.75rem;opacity:0.7;margin-top:0.5rem">
+        各客户端直接填此链接即可。手动指定格式: 加 &amp;target=sing-box / clash / surge / qx
+      </p>
+      ${failureNote}
+    `;
+    focusDrawerPane(configWorkbenchEl, "status");
+  } catch (err) {
+    statusBoxEl.innerHTML = `<p class="error">网络错误: ${escapeHtml(err instanceof Error ? err.message : "请求失败")}</p>`;
+    focusDrawerPane(configWorkbenchEl, "status");
+  } finally {
+    publishButtonEl.disabled = false;
+  }
+});
+
 /* ─── Subscription Transform ─── */
 subscriptionTransformButtonEl.addEventListener("click", async () => {
   const input = subscriptionInputTextEl.value.trim();
@@ -659,6 +831,10 @@ subscriptionTransformButtonEl.addEventListener("click", async () => {
       <article class="summary-chip">
         <span>节点数量</span>
         <strong>${outputMode === "link" ? "由远程转换" : result.proxies.length}</strong>
+      </article>
+      <article class="summary-chip">
+        <span>转换管线</span>
+        <strong>${escapeHtml(getSubscriptionPipelineLabel(result.pipeline))}</strong>
       </article>
       <article class="summary-chip wide">
         <span>输出方式</span>
@@ -698,3 +874,6 @@ subscriptionDownloadButtonEl.addEventListener("click", () => {
   subscriptionStatusBoxEl.innerHTML = `<p class="success-copy">已导出文件: ${escapeHtml(latestSubscriptionFileName)}</p>`;
   focusDrawerPane(subscriptionWorkbenchEl, "status");
 });
+
+initSourceWorkbench(sourceWorkbenchEl);
+activateWorkbench("config");
