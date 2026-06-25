@@ -533,6 +533,23 @@ function hasAllowedBrowserOrigin(request, expectedOrigin, options = {}) {
     || (fetchSite === 'cross-site' && options.allowCrossSiteDocumentNavigation);
 }
 
+function isCloudflareTunnelRequest(request) {
+  return !!(
+    request.headers.get('cf-connecting-ip')
+    || request.headers.get('cf-ray')
+    || request.headers.get('cf-visitor')
+  );
+}
+
+function reconstructPublicUrl(request, env = process.env) {
+  const publicOrigin = configuredPublicAdminOrigin(env);
+  if (!publicOrigin) {
+    return null;
+  }
+  const originalUrl = new URL(request.url);
+  return new URL(originalUrl.pathname + originalUrl.search, publicOrigin);
+}
+
 function isAllowedPublicAdminRequest(request, url, env = process.env) {
   const publicOrigin = configuredPublicAdminOrigin(env);
   if (!publicOrigin || url.hostname !== publicOrigin.hostname) {
@@ -547,6 +564,14 @@ function isAllowedPublicAdminRequest(request, url, env = process.env) {
 }
 
 export function isAllowedLocalAdminRequest(request, url, env = process.env) {
+  // Cloudflare Tunnel 转发检测：本地 hostname 但带 CF 头
+  if (isLocalHostname(url.hostname) && isCloudflareTunnelRequest(request)) {
+    const publicUrl = reconstructPublicUrl(request, env);
+    if (publicUrl) {
+      return isAllowedPublicAdminRequest(request, publicUrl, env);
+    }
+  }
+
   if (!isLocalHostname(url.hostname)) {
     return isAllowedPublicAdminRequest(request, url, env);
   }
