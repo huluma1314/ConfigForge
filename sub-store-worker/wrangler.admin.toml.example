@@ -1,0 +1,9 @@
+name = "sub-store-admin-kv"
+main = "worker.js"
+compatibility_date = "2026-05-09"
+
+[[kv_namespaces]]
+binding = "SUB_TOKENS"
+# 填入你的 KV Namespace ID
+# 获取方式: wrangler kv:namespace list
+id = "YOUR_KV_NAMESPACE_ID_HERE"

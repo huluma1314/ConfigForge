@@ -1,0 +1,25 @@
+name = "sub-store"
+main = "worker.js"
+compatibility_date = "2026-05-09"
+workers_dev = true
+
+[vars]
+GH_REPO = "your-github-username/your-repo-name"
+CACHE_VERSION = "202606130808"
+
+[[kv_namespaces]]
+binding = "SUB_TOKENS"
+# 填入你的 KV Namespace ID
+# 获取方式: wrangler kv:namespace list
+id = "YOUR_KV_NAMESPACE_ID_HERE"
+
+[[unsafe.bindings]]
+name = "SUB_STORE_RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 20, period = 10 }
+
+[[routes]]
+# 修改为你的域名
+pattern = "sub.example.com/*"
+zone_name = "example.com"

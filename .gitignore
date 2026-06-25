@@ -6,3 +6,11 @@ coverage
 .tmp-check
 *.bak
 quantumult_*.conf
+
+# 环境变量与密钥
+.env.local
+*.local
+
+# Wrangler 配置（包含真实 KV namespace ID 和 account ID）
+sub-store-worker/wrangler.toml
+sub-store-worker/wrangler.admin.toml
