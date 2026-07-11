@@ -533,7 +533,7 @@ export function parseNodeFilterLogSummary(logText = '', { pool = 'public' } = {}
   }
 
   const privatePool = pool === 'wuhusihai';
-  const privateHistory = text.match(/五湖四海 Clash Verge：历史\s*(\d+)，可解析\s*(\d+)/);
+  const privateHistory = text.match(/五湖四海 Clash Verge(?: 实时客户端)?：历史\s*(\d+)，可解析\s*(\d+)/);
   const hasStrictResult = /严格通过：\d+\//.test(text)
     || /实时响应：\d+\//.test(text)
     || /五湖四海(?:实测通过|实时响应)\s*\d+/.test(text);
