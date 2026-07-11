@@ -2,7 +2,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,18 +12,44 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..');
 const DIST_DIR = join(ROOT_DIR, 'dist');
 const SUB_STORE_ADMIN_DIR = join(ROOT_DIR, 'src', 'sub-store-admin');
+const UI_DIR = join(ROOT_DIR, 'src', 'ui');
 const SUB_STORE_WORKER_DIR = join(ROOT_DIR, 'sub-store-worker');
 const SUB_STORE_ADMIN_WRANGLER_CONFIG = join(SUB_STORE_WORKER_DIR, 'wrangler.admin.toml');
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8789;
 const TOKEN_PREFIX = 'sub-token:';
 const SUBSCRIPTION_PATH = 'base64';
+const CLASH_SUBSCRIPTION_PATH = 'clash-best';
 const ALMA_CONFIG_DIR = join(process.env.HOME || '.', '.config', 'alma');
+const ALMA_TG_NODES_DIR = process.env.ALMA_TG_NODES_DIR || join(process.env.HOME || '.', 'tg_nodes');
 const PRIVATE_SOURCES_FILE = join(ALMA_CONFIG_DIR, 'tg-fetcher-private-sources.json');
+const MANUAL_NODES_FILE = process.env.ALMA_MANUAL_NODES_FILE || join(ALMA_CONFIG_DIR, 'tg-fetcher-manual-nodes.json');
 const TG_FETCHER_SCRIPT = process.env.TG_FETCHER_SCRIPT || join(ROOT_DIR, '..', 'Alma', 'tg_node_fetcher.py');
 const TG_FETCHER_STATE_FILE = join(ALMA_CONFIG_DIR, 'state', 'tg-node-fetcher.state.json');
+const NODE_FILTER_STATE_FILE = join(ALMA_CONFIG_DIR, 'state', 'node-filter.state.json');
+const NODE_FILTER_LOG_DIR = join(process.env.HOME || '.', 'Desktop', 'AlmaLogs', 'node-filter-runs');
+const WUHUSIHAI_FETCHER_STATE_FILE = join(ALMA_CONFIG_DIR, 'state', 'wuhusihai-node-fetcher.state.json');
+const WUHUSIHAI_FILTER_STATE_FILE = join(ALMA_CONFIG_DIR, 'state', 'wuhusihai-node-filter.state.json');
+const WUHUSIHAI_FILTER_LOG_DIR = join(process.env.HOME || '.', 'Desktop', 'AlmaLogs', 'wuhusihai-filter-runs');
+const ALMA_PIPELINES = {
+  public: {
+    label: '通用池',
+    fetchStateFile: TG_FETCHER_STATE_FILE,
+    filterStateFile: NODE_FILTER_STATE_FILE,
+    filterLogDir: NODE_FILTER_LOG_DIR,
+    filterLogPrefixes: ['public-node-filter-', 'node-filter-'],
+  },
+  wuhusihai: {
+    label: '五湖四海',
+    fetchStateFile: WUHUSIHAI_FETCHER_STATE_FILE,
+    filterStateFile: WUHUSIHAI_FILTER_STATE_FILE,
+    filterLogDir: WUHUSIHAI_FILTER_LOG_DIR,
+    filterLogPrefixes: ['wuhusihai-node-filter-'],
+  },
+};
 const SUB_FETCH_PROXY_FILE = join(ALMA_CONFIG_DIR, 'sub-fetch-proxy');
 const SOURCE_POOLS = new Set(['public', 'wuhusihai']);
+const MANUAL_NODE_PROTOCOLS = new Set(['vmess', 'vless', 'ss', 'ssr', 'trojan', 'hy2', 'hysteria', 'hysteria2', 'tuic', 'anytls']);
 const SOURCE_POOL_LABELS = {
   public: '公共池',
   wuhusihai: '五湖四海私有池',
@@ -94,12 +120,35 @@ function makeToken() {
   return randomBytes(24).toString('base64url');
 }
 
+export function subscriptionLinksFromToken(token) {
+  const validatedToken = validateToken(token);
+  const base64Subscription = `https://sub.huluma.dpdns.org/${SUBSCRIPTION_PATH}?token=${validatedToken}`;
+  const clashSubscription = `https://sub.huluma.dpdns.org/${CLASH_SUBSCRIPTION_PATH}?token=${validatedToken}`;
+  return {
+    subscription: base64Subscription,
+    base64Subscription,
+    clashSubscription,
+    deliveryText: [
+      `base64订阅链接：${base64Subscription}`,
+      `clash订阅链接：${clashSubscription}`,
+    ].join('\n'),
+  };
+}
+
 function sourceIdFromRecord(record = {}) {
   if (record.id && /^[A-Za-z0-9:_-]{4,120}$/.test(String(record.id))) {
     return String(record.id);
   }
   const basis = `${record.name || 'source'}\n${record.url || ''}`;
   return `manual-${hashText(basis).slice(0, 12)}`;
+}
+
+function manualNodeIdFromRecord(record = {}) {
+  if (record.id && /^[A-Za-z0-9:_-]{4,120}$/.test(String(record.id))) {
+    return String(record.id);
+  }
+  const basis = `${record.name || 'node'}\n${record.uri || record.node || record.url || ''}`;
+  return `manual-node-${hashText(basis).slice(0, 12)}`;
 }
 
 function validateSourceId(value) {
@@ -137,6 +186,28 @@ export function validateSubscriptionSourceInput(value = {}) {
   };
 }
 
+export function validateManualNodeInput(value = {}) {
+  const name = validateLabel(value.name);
+  const uri = String(value.uri || value.node || value.url || '').trim();
+  const match = uri.match(/^([a-z0-9]+):\/\//i);
+  if (!match || !MANUAL_NODE_PROTOCOLS.has(match[1].toLowerCase())) {
+    throw new Error('Node URI must start with a supported proxy scheme');
+  }
+
+  const pool = String(value.pool || 'public').trim();
+  if (!SOURCE_POOLS.has(pool)) {
+    throw new Error('Invalid target pool');
+  }
+
+  return {
+    id: value.id ? validateSourceId(value.id) : `manual-node-${randomUUID()}`,
+    name,
+    uri,
+    pool,
+    enabled: value.enabled !== false,
+  };
+}
+
 export function normalizeManualSubscriptionSources(rawSources = []) {
   const input = Array.isArray(rawSources)
     ? rawSources
@@ -168,9 +239,54 @@ export function normalizeManualSubscriptionSources(rawSources = []) {
   return normalized;
 }
 
+export function normalizeManualNodes(rawNodes = []) {
+  const input = Array.isArray(rawNodes)
+    ? rawNodes
+    : Object.entries(rawNodes || {}).map(([name, uri]) => ({ name, uri }));
+  const normalized = [];
+  const seenIds = new Set();
+  const seenUris = new Set();
+
+  for (const item of input) {
+    const record = typeof item === 'string'
+      ? { name: `manual-node-${normalized.length + 1}`, uri: item }
+      : item;
+    try {
+      const id = manualNodeIdFromRecord(record);
+      const next = validateManualNodeInput({
+        id,
+        name: record.name,
+        uri: record.uri || record.node || record.url,
+        pool: record.pool || 'public',
+        enabled: record.enabled !== false,
+      });
+      if (seenIds.has(next.id) || seenUris.has(next.uri)) {
+        continue;
+      }
+      seenIds.add(next.id);
+      seenUris.add(next.uri);
+      normalized.push(next);
+    } catch {
+      // Keep the admin UI resilient if an old hand-written entry is malformed.
+    }
+  }
+  return normalized;
+}
+
 export async function loadManualSubscriptionSources(path = PRIVATE_SOURCES_FILE) {
   try {
     return normalizeManualSubscriptionSources(JSON.parse(await readFile(path, 'utf8')));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+}
+
+export async function loadManualNodes(path = MANUAL_NODES_FILE) {
+  try {
+    return normalizeManualNodes(JSON.parse(await readFile(path, 'utf8')));
   } catch (error) {
     if (error?.code === 'ENOENT') {
       return [];
@@ -186,19 +302,85 @@ export async function saveManualSubscriptionSources(sources, path = PRIVATE_SOUR
   return normalized;
 }
 
+export async function saveManualNodes(nodes, path = MANUAL_NODES_FILE) {
+  const normalized = normalizeManualNodes(nodes);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
+  return normalized;
+}
+
+export async function migrateManualSubscriptionSources(path = PRIVATE_SOURCES_FILE) {
+  let rawText;
+  try {
+    rawText = await readFile(path, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+
+  const normalized = normalizeManualSubscriptionSources(JSON.parse(rawText));
+  const normalizedText = `${JSON.stringify(normalized, null, 2)}\n`;
+  if (rawText.trim() !== normalizedText.trim()) {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, normalizedText, 'utf8');
+  }
+  return normalized;
+}
+
 export function upsertManualSubscriptionSource(sources = [], input = {}) {
   const normalized = normalizeManualSubscriptionSources(sources);
   const next = validateSubscriptionSourceInput(input);
-  const index = normalized.findIndex((source) => source.id === next.id);
-  if (index === -1) {
+  const idIndex = normalized.findIndex((source) => source.id === next.id);
+  const urlIndex = normalized.findIndex((source) => source.url === next.url);
+
+  if (idIndex === -1 && urlIndex === -1) {
     return [...normalized, next];
   }
-  return normalized.map((source, sourceIndex) => (sourceIndex === index ? next : source));
+
+  if (idIndex === -1) {
+    return normalized.map((source, sourceIndex) => (
+      sourceIndex === urlIndex ? { ...next, id: source.id } : source
+    ));
+  }
+
+  const updated = { ...next, id: normalized[idIndex].id };
+  return normalized
+    .map((source, sourceIndex) => (sourceIndex === idIndex ? updated : source))
+    .filter((source, sourceIndex) => sourceIndex === idIndex || source.url !== updated.url);
+}
+
+export function upsertManualNode(nodes = [], input = {}) {
+  const normalized = normalizeManualNodes(nodes);
+  const next = validateManualNodeInput(input);
+  const idIndex = normalized.findIndex((node) => node.id === next.id);
+  const uriIndex = normalized.findIndex((node) => node.uri === next.uri);
+
+  if (idIndex === -1 && uriIndex === -1) {
+    return [...normalized, next];
+  }
+
+  if (idIndex === -1) {
+    return normalized.map((node, nodeIndex) => (
+      nodeIndex === uriIndex ? { ...next, id: node.id } : node
+    ));
+  }
+
+  const updated = { ...next, id: normalized[idIndex].id };
+  return normalized
+    .map((node, nodeIndex) => (nodeIndex === idIndex ? updated : node))
+    .filter((node, nodeIndex) => nodeIndex === idIndex || node.uri !== updated.uri);
 }
 
 export function deleteManualSubscriptionSource(sources = [], id) {
   const sourceId = validateSourceId(id);
   return normalizeManualSubscriptionSources(sources).filter((source) => source.id !== sourceId);
+}
+
+export function deleteManualNode(nodes = [], id) {
+  const nodeId = validateSourceId(id);
+  return normalizeManualNodes(nodes).filter((node) => node.id !== nodeId);
 }
 
 function protocolOfNode(node = '') {
@@ -217,9 +399,27 @@ function nodeEndpointPreview(node = '') {
       label = `#${text.split('#').pop().slice(0, 32)}`;
     }
   }
+  if (protocol === 'vmess') {
+    try {
+      const payload = text.slice('vmess://'.length).split('#')[0].trim();
+      const decoded = Buffer.from(payload, 'base64').toString('utf8');
+      const info = JSON.parse(decoded);
+      const endpoint = info.add ? `${info.add}${info.port ? `:${info.port}` : ''}` : '<hidden>';
+      const vmessLabel = String(info.ps || '').trim() ? `#${String(info.ps).trim().slice(0, 32)}` : label;
+      return `vmess://${endpoint}${vmessLabel}`;
+    } catch {
+      return `vmess://<hidden>${label}`;
+    }
+  }
+  if (protocol === 'ssr') {
+    return `ssr://<hidden>${label}`;
+  }
   try {
     const url = new URL(text);
     const endpoint = url.hostname ? `${url.hostname}${url.port ? `:${url.port}` : ''}` : '<hidden>';
+    if (endpoint.length > 120) {
+      return `${protocol}://<hidden>${label}`;
+    }
     return `${protocol}://${endpoint}${label}`;
   } catch {
     return `${protocol}://<hidden>${label}`;
@@ -242,13 +442,377 @@ export function buildSourceTestSummary(nodes = []) {
   };
 }
 
+function numberFromText(text, pattern) {
+  const match = String(text || '').match(pattern);
+  return match ? Number(match[1]) : null;
+}
+
+function finiteNumberOrNull(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function roundOne(value) {
+  return Math.round(Number(value || 0) * 10) / 10;
+}
+
+function countNonEmptyLines(text = '') {
+  return String(text || '').split(/\r?\n/).filter((line) => line.trim()).length;
+}
+
+function durationSecondsFromState(state = {}) {
+  const startedAt = Date.parse(String(state?.last_started_at || ''));
+  const finishedAt = Date.parse(String(state?.last_finished_at || ''));
+  if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt) || finishedAt < startedAt) {
+    return null;
+  }
+  return Math.round((finishedAt - startedAt) / 1000);
+}
+
+function maskSubscriptionUrl(value = '') {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return `${parsed.protocol}//${parsed.host}/...`;
+  } catch {
+    return '<hidden>';
+  }
+}
+
+async function readNodeFileSummary(path) {
+  const text = await readTextFileIfExists(path);
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return {
+    count: lines.length,
+  };
+}
+
+async function readDiscoveredSubscriptionSummary(path) {
+  const data = await readJsonFileIfExists(path, {});
+  const stats = data && typeof data === 'object' && data.stats && typeof data.stats === 'object'
+    ? data.stats
+    : {};
+  const entries = Object.entries(stats).map(([url, stat]) => ({
+    url: maskSubscriptionUrl(url),
+    status: String(stat?.status || ''),
+    nodes: Number(stat?.nodes || 0),
+    fetchedNodes: Number(stat?.fetched_nodes || 0),
+    truncated: Boolean(stat?.truncated),
+  }));
+  const ok = entries.filter((item) => item.status === 'ok').length;
+  const empty = entries.filter((item) => item.status === 'empty').length;
+  const truncated = entries.filter((item) => item.truncated).length;
+  const nodes = entries.reduce((sum, item) => sum + item.nodes, 0);
+  const fetchedNodes = entries.reduce((sum, item) => sum + item.fetchedNodes, 0);
+  return {
+    total: entries.length,
+    ok,
+    empty,
+    failed: entries.length - ok - empty,
+    nodes,
+    fetchedNodes,
+    truncated,
+    top: entries
+      .filter((item) => item.nodes > 0 || item.status)
+      .sort((left, right) => right.nodes - left.nodes || left.url.localeCompare(right.url))
+      .slice(0, 20),
+  };
+}
+
+export function parseNodeFilterLogSummary(logText = '', { pool = 'public' } = {}) {
+  const text = String(logText || '').replace(ANSI_PATTERN, '');
+  const sourceRows = [];
+  const sourcePattern = /^\s{2,}(.+?):\s*(\d+)\/(\d+)\s*\(([\d.]+)%\).*$/gm;
+  let match;
+  while ((match = sourcePattern.exec(text)) !== null) {
+    sourceRows.push({
+      name: match[1],
+      passed: Number(match[2]),
+      total: Number(match[3]),
+      ratio: Number(match[4]),
+    });
+  }
+
+  const privatePool = pool === 'wuhusihai';
+  const privateHistory = text.match(/五湖四海 Clash Verge：历史\s*(\d+)，可解析\s*(\d+)/);
+  const hasStrictResult = /严格通过：\d+\//.test(text)
+    || /实时响应：\d+\//.test(text)
+    || /五湖四海(?:实测通过|实时响应)\s*\d+/.test(text);
+  const rawCount = privatePool
+    ? (privateHistory ? Number(privateHistory[1]) : numberFromText(text, /五湖四海实测通过\s*\d+\/(\d+)/))
+    : numberFromText(text, /原始节点总数：(\d+)/);
+  const parsedCount = privatePool
+    ? (privateHistory ? Number(privateHistory[2]) : null)
+    : numberFromText(text, /解析成功：(\d+)/);
+  const strictPassedCount = privatePool
+    ? (numberFromText(text, /五湖四海实时响应\s*(\d+)/) ?? numberFromText(text, /五湖四海实测通过\s*(\d+)\//))
+    : (numberFromText(text, /实时响应：(\d+)\//) ?? numberFromText(text, /严格通过：(\d+)\//));
+  const exportedCount = privatePool
+    ? (numberFromText(text, /前\s*\d+\s*导出\s*(\d+)\//) ?? numberFromText(text, /五湖四海实测通过\s*(\d+)\//))
+    : (
+      numberFromText(text, /前\s*\d+\s*导出：(\d+)/)
+      ??
+      numberFromText(text, /filtered_client_best_base64\.txt:\s*(\d+)\s*个(?:本机严格通过)?节点/)
+      ?? numberFromText(text, /filtered_(?:best_)?base64\.txt:\s*(\d+)\s*个(?:本机严格通过)?节点/)
+    );
+
+  return {
+    pool: privatePool ? 'wuhusihai' : 'public',
+    rawCount,
+    parsedCount,
+    strictPassedCount,
+    exportedCount,
+    durationSeconds: numberFromText(text, /总耗时\s*(\d+)s/),
+    sources: sourceRows,
+    legacy: !hasStrictResult,
+  };
+}
+
+export function buildAlmaRunTrendItem({ date = '', total = 0, filter = {} } = {}) {
+  const rawCount = finiteNumberOrNull(filter?.rawCount) ?? finiteNumberOrNull(total) ?? 0;
+  const parsedCount = finiteNumberOrNull(filter?.parsedCount);
+  const strictPassedCount = finiteNumberOrNull(filter?.strictPassedCount);
+  const exportedCount = finiteNumberOrNull(filter?.exportedCount);
+  const strictRatio = rawCount > 0 && strictPassedCount !== null
+    ? roundOne((strictPassedCount / rawCount) * 100)
+    : null;
+
+  return {
+    date,
+    rawCount,
+    parsedCount,
+    strictPassedCount,
+    exportedCount,
+    strictRatio,
+    legacy: Boolean(filter?.legacy),
+  };
+}
+
+function sourceCountsFromState(tgState = {}) {
+  const counts = tgState && typeof tgState === 'object' && tgState.source_counts && typeof tgState.source_counts === 'object'
+    ? tgState.source_counts
+    : {};
+  return Object.entries(counts)
+    .map(([name, value]) => {
+      const objectValue = value && typeof value === 'object' ? value : null;
+      return {
+        name,
+        title: objectValue?.title || name,
+        count: objectValue ? Number(objectValue.nodes || 0) : Number(value || 0),
+        messages: objectValue ? Number(objectValue.messages || 0) : null,
+        urls: objectValue ? Number(objectValue.urls || 0) : null,
+        registeredUrls: objectValue ? Number(objectValue.registered_urls || 0) : null,
+        refreshedUrls: objectValue ? Number(objectValue.refreshed_urls || 0) : null,
+        validUrls: objectValue ? Number(objectValue.valid_urls || 0) : null,
+      };
+    })
+    .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+}
+
+export async function buildAlmaRunDaySummary({
+  date,
+  dayDir,
+  tgState = {},
+  filterState = {},
+  filterLogText = '',
+  pool = 'public',
+} = {}) {
+  const tgStateDate = String(tgState?.last_finished_at || tgState?.last_started_at || '').slice(0, 10);
+  const filterStateDate = String(filterState?.last_finished_at || filterState?.last_started_at || '').slice(0, 10);
+  const effectiveTgState = tgStateDate === date ? tgState : {};
+  const effectiveFilterState = filterStateDate === date ? filterState : {};
+  const publicFileMap = {
+    allNodes: ['all_nodes.txt', '公共聚合池'],
+    publicDaily: ['public_daily_nodes.txt', '公开日更源'],
+    fixedAndManualPublic: ['fixed_subscription_nodes.txt', '固定/手动公共源'],
+    tgSubscriptions: ['tg_channel_subscription_nodes.txt', 'TG 节点池'],
+    manualWuhusihai: ['manual_wuhusihai_subscription_nodes.txt', '手动五湖四海源'],
+  };
+  const filter = parseNodeFilterLogSummary(filterLogText, { pool });
+  if (filter.durationSeconds === null) {
+    filter.durationSeconds = durationSecondsFromState(effectiveFilterState);
+  }
+  const files = {};
+  if (pool === 'wuhusihai') {
+    files.history = {
+      label: '180 天历史节点',
+      filename: 'wuhusihaiNodes.txt',
+      count: filter.rawCount,
+    };
+  } else {
+    for (const [key, [filename, label]] of Object.entries(publicFileMap)) {
+      files[key] = {
+        label,
+        filename,
+        ...(await readNodeFileSummary(join(dayDir, filename))),
+      };
+    }
+  }
+
+  const discovered = pool === 'wuhusihai'
+    ? {
+      tg: { total: 0, ok: 0, empty: 0, failed: 0, nodes: 0, fetchedNodes: 0, truncated: 0, top: [] },
+      wuhusihai: await readDiscoveredSubscriptionSummary(join(dayDir, 'wuhusihai_discovered_subscriptions.json')),
+    }
+    : {
+      tg: await readDiscoveredSubscriptionSummary(join(dayDir, 'tg_discovered_subscriptions.json')),
+      wuhusihai: await readDiscoveredSubscriptionSummary(join(dayDir, 'wuhusihai_discovered_subscriptions.json')),
+    };
+
+  return {
+    pool,
+    date,
+    fetch: {
+      status: effectiveTgState?.status || '',
+      startedAt: effectiveTgState?.last_started_at || '',
+      finishedAt: effectiveTgState?.last_finished_at || '',
+      proxy: effectiveTgState?.proxy || '',
+      summary: effectiveTgState?.summary || {},
+    },
+    filter: {
+      status: effectiveFilterState?.status || '',
+      startedAt: effectiveFilterState?.last_started_at || '',
+      finishedAt: effectiveFilterState?.last_finished_at || '',
+      ...filter,
+    },
+    files,
+    discovered,
+    sourceCounts: pool === 'wuhusihai' ? [] : sourceCountsFromState(effectiveTgState),
+  };
+}
+
+async function listAlmaRunDates(baseDir = ALMA_TG_NODES_DIR, limit = 14) {
+  try {
+    const entries = await readdir(baseDir, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse()
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+async function latestFilterLogForDate(date, pipeline = ALMA_PIPELINES.public) {
+  const compactDate = String(date || '').replaceAll('-', '');
+  if (!compactDate) {
+    return '';
+  }
+  try {
+    const entries = await readdir(pipeline.filterLogDir);
+    const matched = entries
+      .filter((name) => pipeline.filterLogPrefixes.some((prefix) => name.startsWith(`${prefix}${compactDate}-`)) && name.endsWith('.log'))
+      .sort();
+    const latest = matched.at(-1);
+    return latest ? await readTextFileIfExists(join(pipeline.filterLogDir, latest)) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function listFilterLogDates(pipeline, limit) {
+  try {
+    const entries = await readdir(pipeline.filterLogDir);
+    return [...new Set(entries
+      .map((name) => {
+        const prefix = pipeline.filterLogPrefixes.find((item) => name.startsWith(item));
+        const match = prefix && name.match(/(\d{4})(\d{2})(\d{2})-/);
+        return match ? `${match[1]}-${match[2]}-${match[3]}` : '';
+      })
+      .filter(Boolean))]
+      .sort()
+      .reverse()
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+async function listAlmaPipelineRuns(pool, searchParams = new URLSearchParams()) {
+  const pipeline = ALMA_PIPELINES[pool];
+  const requestedDays = Number(searchParams.get('days') || 14);
+  const dayLimit = Math.min(Math.max(Number.isFinite(requestedDays) ? requestedDays : 14, 1), 60);
+  const dates = pool === 'public'
+    ? await listAlmaRunDates(ALMA_TG_NODES_DIR, dayLimit)
+    : await listFilterLogDates(pipeline, dayLimit);
+  const selectedDate = dates.includes(searchParams.get('date')) ? searchParams.get('date') : dates[0] || '';
+  const tgState = await readJsonFileIfExists(pipeline.fetchStateFile, {});
+  const filterState = await readJsonFileIfExists(pipeline.filterStateFile, {});
+
+  const days = [];
+  const trend = [];
+  const filterLogsByDate = new Map();
+  for (const date of dates) {
+    const dayDir = join(ALMA_TG_NODES_DIR, date);
+    const allNodesText = pool === 'public' ? await readTextFileIfExists(join(dayDir, 'all_nodes.txt')) : '';
+    const total = countNonEmptyLines(allNodesText);
+    const filterLogText = await latestFilterLogForDate(date, pipeline);
+    filterLogsByDate.set(date, filterLogText);
+    const filter = parseNodeFilterLogSummary(filterLogText, { pool });
+    const trendItem = buildAlmaRunTrendItem({
+      date,
+      total,
+      filter,
+    });
+    days.push({
+      date,
+      total: trendItem.rawCount,
+      selected: date === selectedDate,
+    });
+    trend.push(trendItem);
+  }
+
+  const current = selectedDate
+    ? await buildAlmaRunDaySummary({
+        date: selectedDate,
+        dayDir: join(ALMA_TG_NODES_DIR, selectedDate),
+        tgState,
+        filterState,
+        filterLogText: filterLogsByDate.get(selectedDate) || await latestFilterLogForDate(selectedDate, pipeline),
+        pool,
+      })
+    : null;
+
+  return {
+    pool,
+    label: pipeline.label,
+    days,
+    selectedDate,
+    trend: [...trend].reverse(),
+    current,
+    recentState: {
+      fetch: tgState,
+      filter: filterState,
+    },
+  };
+}
+
+async function listAlmaRuns(searchParams = new URLSearchParams()) {
+  const [publicPipeline, wuhusihaiPipeline] = await Promise.all([
+    listAlmaPipelineRuns('public', searchParams),
+    listAlmaPipelineRuns('wuhusihai', searchParams),
+  ]);
+  return {
+    pipelines: {
+      public: publicPipeline,
+      wuhusihai: wuhusihaiPipeline,
+    },
+    ...publicPipeline,
+  };
+}
+
 export async function fastTokenAdd(label, env = process.env) {
   const apiToken = env.CLOUDFLARE_API_TOKEN;
 
   if (!apiToken) {
     // 回退到 wrangler
     const output = await runTokenCommand(['add', '--label', label, '--write']);
-    return parseTokenCommandOutput(output);
+    const parsed = parseTokenCommandOutput(output);
+    return {
+      ...parsed,
+      ...subscriptionLinksFromToken(parsed.token),
+    };
   }
 
   // 使用 REST API
@@ -268,7 +832,7 @@ export async function fastTokenAdd(label, env = process.env) {
     token,
     kvKey: key,
     record,
-    subscription: `https://sub.huluma.dpdns.org/${SUBSCRIPTION_PATH}?token=${token}`,
+    ...subscriptionLinksFromToken(token),
   };
 }
 
@@ -358,7 +922,7 @@ export function listUsersFromRecords(items) {
       return {
         label: item.value.label || '未命名',
         token,
-        subscription: `https://sub.huluma.dpdns.org/${SUBSCRIPTION_PATH}?token=${token}`,
+        ...subscriptionLinksFromToken(token),
         status: item.value.status || 'active',
         createdAt: item.value.createdAt || '',
         stats: item.value.stats || {
@@ -736,6 +1300,7 @@ async function readTextFileIfExists(path) {
 }
 
 async function listSubscriptionSources() {
+  await migrateManualSubscriptionSources();
   try {
     return await runFetcherJson(['--list-sources-json']);
   } catch {
@@ -754,10 +1319,29 @@ async function listSubscriptionSources() {
       recentRun,
       execution: [
         '每天 08:00 由 LaunchAgent 执行 tg_node_fetcher.py。',
-        '公共池进入聚合节点池，五湖四海私有池进入 /wuhusihai 和 /wuhusihai-raw。',
+        '订阅链接和手动单节点进入所属节点池后，均由 Clash Verge 本机核心严格实测。',
+        '五湖四海私有池进入 /wuhusihai 和 /wuhusihai-raw。',
       ],
     };
   }
+}
+
+function manualNodeForResponse(node = {}) {
+  return {
+    ...node,
+    kind: 'manual-node',
+    editable: true,
+    title: node.name,
+    preview: nodeEndpointPreview(node.uri),
+    method: '本地管理页手动单节点（进入所属池后 Clash Verge 实测）',
+  };
+}
+
+async function listManualNodes() {
+  const nodes = await loadManualNodes();
+  return {
+    nodes: nodes.map(manualNodeForResponse),
+  };
 }
 
 // Cloudflare REST API 函数
@@ -853,7 +1437,7 @@ async function cfKvList(env = process.env) {
   }
 
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/keys`,
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/keys?limit=1000`,
     {
       headers: {
         'Authorization': `Bearer ${apiToken}`,
@@ -867,6 +1451,54 @@ async function cfKvList(env = process.env) {
 
   const data = await response.json();
   return data.result.map(item => ({ name: item.name }));
+}
+
+async function cfKvBulkGet(keys, env = process.env) {
+  const apiToken = env.CLOUDFLARE_API_TOKEN;
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  const namespaceId = env.CLOUDFLARE_KV_NAMESPACE_ID;
+
+  if (!apiToken) {
+    return null;
+  }
+
+  const records = [];
+  for (let index = 0; index < keys.length; index += 100) {
+    const chunk = keys.slice(index, index + 100);
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/bulk/get`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ keys: chunk }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`CF API error: ${response.status} ${await response.text()}`);
+    }
+
+    const data = await response.json();
+    const values = data?.result?.values || {};
+    for (const key of chunk) {
+      const rawValue = values[key];
+      const value = rawValue && typeof rawValue === 'object' && 'value' in rawValue
+        ? rawValue.value
+        : rawValue;
+      try {
+        records.push({
+          name: key,
+          value: JSON.parse(value || '{}'),
+        });
+      } catch (error) {
+        console.warn(`[WARN] Failed to parse KV item ${key}:`, error.message);
+      }
+    }
+  }
+  return records;
 }
 
 // 并发控制工具函数
@@ -896,34 +1528,20 @@ async function parallelLimit(tasks, limit) {
   return results;
 }
 
-async function listUsers() {
+async function listUsers(env = process.env) {
   // 优先使用 Cloudflare REST API
-  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  const apiToken = env.CLOUDFLARE_API_TOKEN;
 
   if (apiToken) {
     try {
-      const listed = await cfKvList();
+      const listed = await cfKvList(env);
       const tokenItems = listed.filter((item) => item?.name?.startsWith(TOKEN_PREFIX));
 
       if (tokenItems.length === 0) {
         return [];
       }
 
-      // 使用 REST API 并发获取
-      const records = await Promise.all(
-        tokenItems.map(async (item) => {
-          try {
-            const raw = await cfKvGet(item.name);
-            return {
-              name: item.name,
-              value: JSON.parse(raw || '{}'),
-            };
-          } catch (error) {
-            console.warn(`[WARN] Failed to parse KV item ${item.name}:`, error.message);
-            return null;
-          }
-        })
-      );
+      const records = await cfKvBulkGet(tokenItems.map((item) => item.name), env);
 
       return listUsersFromRecords(records.filter(Boolean));
     } catch (error) {
@@ -990,15 +1608,47 @@ async function listUsers() {
   }
 }
 
-async function handleApi(request, pathname) {
+async function handleApi(request, pathname, env = process.env) {
   if (pathname === '/api/users' && request.method === 'GET') {
-    return jsonResponse({ users: await listUsers() });
+    return jsonResponse({ users: await listUsers(env) });
   }
   if (pathname === '/api/subscription-sources' && request.method === 'GET') {
     return jsonResponse(await listSubscriptionSources());
   }
+  if (pathname === '/api/manual-nodes' && request.method === 'GET') {
+    return jsonResponse(await listManualNodes());
+  }
+  if (pathname === '/api/alma-runs' && request.method === 'GET') {
+    return jsonResponse(await listAlmaRuns(new URL(request.url).searchParams));
+  }
 
   const body = await readJson(request);
+  if (pathname === '/api/manual-nodes' && request.method === 'POST') {
+    const nodes = await loadManualNodes();
+    const nextNode = validateManualNodeInput(body);
+    const updated = upsertManualNode(nodes, nextNode);
+    await saveManualNodes(updated);
+    return jsonResponse({ node: manualNodeForResponse(nextNode), nodes: updated.map(manualNodeForResponse) });
+  }
+
+  if (pathname === '/api/manual-nodes/update' && request.method === 'POST') {
+    const nodes = await loadManualNodes();
+    const nextNode = validateManualNodeInput(body);
+    if (!nodes.some((node) => node.id === nextNode.id)) {
+      throw new Error('Manual node not found');
+    }
+    const updated = upsertManualNode(nodes, nextNode);
+    await saveManualNodes(updated);
+    return jsonResponse({ node: manualNodeForResponse(nextNode), nodes: updated.map(manualNodeForResponse) });
+  }
+
+  if (pathname === '/api/manual-nodes/delete' && request.method === 'POST') {
+    const nodes = await loadManualNodes();
+    const updated = deleteManualNode(nodes, body.id);
+    await saveManualNodes(updated);
+    return jsonResponse({ deleted: true, nodes: updated.map(manualNodeForResponse) });
+  }
+
   if (pathname === '/api/subscription-sources' && request.method === 'POST') {
     const sources = await loadManualSubscriptionSources();
     const nextSource = validateSubscriptionSourceInput(body);
@@ -1098,7 +1748,7 @@ async function handleRequest(request, env = process.env) {
     }
 
     if (url.pathname.startsWith('/api/')) {
-      return await handleApi(request, url.pathname);
+      return await handleApi(request, url.pathname, env);
     }
 
     if (url.pathname === '/sub-store/users') {
@@ -1123,6 +1773,24 @@ async function handleRequest(request, env = process.env) {
       return new Response(await readFile(join(SUB_STORE_ADMIN_DIR, file)), {
         headers: {
           'Content-Type': contentTypes[file],
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
+
+    if (url.pathname === '/sub-store/admin-app.css') {
+      return new Response(await readFile(join(SUB_STORE_ADMIN_DIR, 'admin-app.css')), {
+        headers: {
+          'Content-Type': 'text/css; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
+
+    if (url.pathname === '/ui/macos-shell.css') {
+      return new Response(await readFile(join(UI_DIR, 'macos-shell.css')), {
+        headers: {
+          'Content-Type': 'text/css; charset=utf-8',
           'Cache-Control': 'no-store',
         },
       });
